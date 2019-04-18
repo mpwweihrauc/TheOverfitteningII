@@ -1,0 +1,124 @@
+---
+title: "TheOverfitteningII"
+author: "Martin Weihrauch"
+date: "`r format(sys.time(), %d %B %Y)`"
+output: 
+  pdf_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+---
+
+```{r Loading_libraries, echo = FALSE, warning = FALSE}
+if(!require(tidyverse)) install.packages("tidyverse")
+if(!require(caret)) install.packages("caret")
+if(!require(doParallel)) install.packages("doParallel")
+if(!require(vtreat)) install.packages("vtreat")
+if(!require(magrittr)) install.packages("magrittr")
+```
+
+```{r Dataset_read_in, echo = FALSE, warning = FALSE, message = FALSE}
+train <- read_csv("train.csv")
+test <- read_csv("test.csv")
+
+# Prepare data for caret.
+train$target <- make.names(train$target)
+train$target <- as.factor(train$target)
+```
+
+
+```{r}
+# Create a tuning grid for testing hyperparameters.
+tuneGrid <- expand.grid(nrounds = seq(10, 2000, 50),
+                   eta = 0.01,
+                   max_depth = 2,
+                   gamma = seq(0.1, 0.5, length = 5),
+                   colsample_bytree = seq(0.2, 0.7, length = 5),
+                   min_child_weight = seq(1, 12, length = 5),
+                   subsample = seq(0.2, 0.7, length = 5)
+                    )
+# Train control.
+trControl <- trainControl(method = "cv",
+                          number = 5,
+                          returnResamp = "all",
+                          summaryFunction = twoClassSummary,
+                          classProbs = TRUE)
+
+# Paralellize.
+cluster <- makeCluster(detectCores(logical = TRUE))
+registerDoParallel(cluster)
+
+# Train an "xgbTree" model with caret.
+fit <- caret::train(data = train,
+                    target ~ .,
+                    method = "xgbTree",
+                    metric = "ROC",
+                    trControl = trControl,
+                    tuneGrid = tuneGrid,
+                    nthread = 1)
+
+# Back to sequential.
+stopCluster(cluster)
+registerDoSEQ()
+
+# Analyse fitting results.
+fit$bestTune
+
+# Plot tuning.
+ggplot(fit)
+
+```
+
+```{r, echo = FALSE}
+# Predicting on test_set.
+fit_pred <- predict(fit, test) %>% as.character() %>% parse_number()
+
+# We create the submission file.
+my_submission <- data.frame(id = test$id, target = fit_pred)
+
+write.table(my_submission, file = "submission.csv",
+            col.names = TRUE,
+            row.names = FALSE,
+            sep = ",")
+```
+
+
+```{r}
+# Train control.
+tuneGrid <- expand.grid(alpha = seq(0, 1, length = 20),
+                        lambda = seq(0.01, 0.1, length = 1000))
+
+trControl <- trainControl(method = "cv",
+                          number = 10,
+                          summaryFunction = twoClassSummary,
+                          returnResamp = "all",
+                          classProbs = TRUE)
+
+# Train an "xgbTree" model with caret.
+fit <- caret::train(data = train,
+                    target ~ .,
+                    method = "glmnet",
+                    metric = "ROC",
+                    trControl = trControl,
+                    tuneGrid = tuneGrid,
+                    preProcess = "pca"
+                    )
+
+# Analyse fitting results.
+fit$bestTune
+
+# Plot tuning.
+ggplot(fit)
+```
+```{r, echo = FALSE}
+# Predicting on test_set.
+fit_pred <- predict(fit, test) %>% as.character() %>% parse_number()
+
+# We create the submission file.
+my_submission <- data.frame(id = test$id, target = fit_pred)
+
+write.table(my_submission, file = "submission.csv",
+            col.names = TRUE,
+            row.names = FALSE,
+            sep = ",")
+```
