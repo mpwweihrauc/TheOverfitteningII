@@ -25,51 +25,6 @@ test <- read.csv("test.csv")
 ```
 
 
-```{r}
-# Create a tuning grid for testing hyperparameters.
-tuneGrid <- expand.grid(nrounds = seq(1, 100, 1),
-                   eta = 0.001,
-                   max_depth = 2,
-                   gamma = 10,
-                   colsample_bytree = 0.7,
-                   min_child_weight = 1,
-                   subsample = 0.7
-                    )
-# Train control.
-trControl <- trainControl(method = "cv",
-                          number = 10,
-                          returnResamp = "all",
-                          summaryFunction = twoClassSummary,
-                          classProbs = TRUE)
-
-# Paralellize.
-cluster <- makeCluster(detectCores(logical = TRUE))
-registerDoParallel(cluster)
-
-# Train an "xgbTree" model with caret.
-fit <- caret::train(data = subset(train, select = -c(id)),
-                    target ~ .,
-                    method = "xgbTree",
-                    metric = "ROC",
-                    trControl = trControl,
-                    tuneGrid = tuneGrid,
-                    nthread = 1)
-
-# Back to sequential.
-stopCluster(cluster)
-registerDoSEQ()
-
-# Analyse fitting results.
-fit$bestTune
-
-# Visualization of the most important features.
-vip(fit, num_features = 10) + ggtitle("Variable importance")
-
-# Plot tuning.
-ggplot(fit)
-
-```
-
 ```{r, echo = FALSE}
 # Predicting on test_set.
 fit_pred <- predict(fit, test, type = "prob") %>% as.character() %>% parse_number()
@@ -338,8 +293,71 @@ write.table(ranger_pred, file = "ranger_submission.csv",
 
 
 ```{r}
+# Create a tuning grid for testing hyperparameters.
+tuneGrid <- expand.grid(
+                  nrounds = seq(50, 1500, 10),
+                   eta = 0.01,
+                   max_depth = 4,
+                   gamma = 0.15,
+                   colsample_bytree = 0.8,
+                   min_child_weight = 1,
+                   subsample = 0.1
+                    )
+# Train control.
+trControl <- trainControl(
+                          method = "repeatedcv",
+                          number = 5,
+                          repeats = 5,
+                          returnResamp = "all",
+                          summaryFunction = twoClassSummary,
+                          classProbs = TRUE)
+
+# Paralellize.
+cluster <- makeCluster(detectCores(logical = TRUE))
+registerDoParallel(cluster)
+
+# Train an "xgbTree" model with caret.
+xgbtree_fit <- caret::train(data = subset(train_caret, select = c("target", selection)),
+                    target ~ .,
+                    method = "xgbTree",
+                    metric = "ROC",
+                    trControl = trControl,
+                    tuneGrid = tuneGrid,
+                    nthread = 1)
+
+# Back to sequential.
+stopCluster(cluster)
+registerDoSEQ()
+
+# Analyse xgbtree_fitting results.
+xgbtree_fit$bestTune
+
+# Visualization of the most important features.
+vip(xgbtree_fit, num_features = 15) + ggtitle("Variable importance")
+
+# Plot tuning.
+ggplot(xgbtree_fit)
+
+# Predicting on test_set.
+xgbtree_fit_pred <- predict(xgbtree_fit, test, type = "prob")
+
 # We create the submission file.
-combined_pred <- data.frame(id = test$id, target = (ranger_fit_pred$X1 + glmnet_fit_pred$X1) / 2)
+xgbtree_pred <- data.frame(id = test$id, target = xgbtree_fit_pred$X1)
+
+colnames(xgbtree_pred) <- c("id", "target")
+
+write.table(xgbtree_pred, file = "xgbtree_submission.csv",
+            col.names = TRUE,
+            row.names = FALSE,
+            quote = FALSE,
+            sep = ",")
+
+```
+
+
+```{r}
+# We create the submission file.
+combined_pred <- data.frame(id = test$id, target = (ranger_fit_pred$X1 + glmnet_fit_pred$X1 + xgbtree_fit_pred$X1) / 3)
 
 colnames(combined_pred) <- c("id", "target")
 
