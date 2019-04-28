@@ -22,41 +22,31 @@ if(!require(glmnet)) install.packages("glmnet")
 ```{r Dataset_read_in, echo = FALSE, warning = FALSE, message = FALSE}
 train <- read.csv("train.csv")
 test <- read.csv("test.csv")
+
+train_caret <- train
+train_caret$target <- as.factor(make.names(train$target))
+train_caret <- subset(train_caret, select = -id)
+
+test_caret <- test
+test_caret <- subset(test_caret, select = -id)
 ```
 
-
-```{r, echo = FALSE}
-# Predicting on test_set.
-fit_pred <- predict(fit, test, type = "prob") %>% as.character() %>% parse_number()
-
-# We create the submission file.
-my_submission <- data.frame(id = test$id, target = fit_pred)
-
-write.table(my_submission, file = "submission.csv",
-            col.names = TRUE,
-            row.names = FALSE,
-            sep = ",")
-```
 
 
 ```{r ranger_model}
 # Paralellize.
-cluster <- makeCluster(detectCores(logical = TRUE))
+cluster <- makeCluster(detectCores(logical = FALSE), type = "PSOCK")
 registerDoParallel(cluster)
-
-train_caret <- train
-train_caret$target <- as.factor(make.names(train$target))
 
 # Create a tuning grid for testing hyperparameters. Optimal mtry for ranger was around 42.
 tuneGrid <- expand.grid(
-                        .mtry = seq(40, 60, 1),
-                        .splitrule = "gini",
+                        .mtry = seq(50, 55, 1),
+                        .splitrule = "extratrees",
                         .min.node.size = 10
                        )
 # Train control.
-trControl <- trainControl(method = "repeatedcv",
-                          number = 5,
-                          repeats = 5,
+trControl <- trainControl(method = "cv",
+                          number = 10,
                           returnResamp = "all",
                           classProbs = TRUE,
                           summaryFunction = twoClassSummary
@@ -66,33 +56,32 @@ trControl <- trainControl(method = "repeatedcv",
 
 # Train ranger model with caret.
 fit <- caret::train(
-                    data = train_caret %>% dplyr::select(-id),
+                    data = train_caret,
                     target ~ .,
                     method = "ranger",
                     metric = "ROC",
                     trControl = trControl,
                     tuneGrid = tuneGrid,
-                    preProcess = c("center", "scale")
-                    num.trees = 500,
+                    preProcess = c("center", "scale"),
+                    num.trees = 1000,
                     importance = "permutation")
 
 # Back to sequential.
 stopCluster(cluster)
-registerDoSEQ()
 
 # Analyse fitting results.
 fit$bestTune
 
 # Visualization of the most important features.
-vip(fit, num_features = 15) + ggtitle("Variable importance")
-ranger_select <- vip(fit, num_features = 15)
+vip(fit, num_features = 40) + ggtitle("Variable importance")
+ranger_select <- vip(fit, num_features = 40)
 ranger_select <- ranger_select$data$Variable
 
 # Plot tuning.
 ggplot(fit)
 
 # Predicting on test_set.
-fit_pred <- predict(fit, test, type = "prob")
+fit_pred <- predict(fit, test_caret, type = "prob")
 
 # We create the submission file.
 my_submission <- data.frame(id = test$id, target = fit_pred$X1)
@@ -107,86 +96,29 @@ write.table(my_submission, file = "submission.csv",
 
 ```
 
-
-```{r recursive_feature_elimination}
-train_caret <- train
-train_caret$target <- as.factor(make.names(train$target))
-
-# Paralellize.
-cluster <- makeCluster(detectCores(logical = TRUE))
-registerDoParallel(cluster)
-
-
-caretFuncs$summary <- twoClassSummary
-
-
-rfeControl <- rfeControl(
-        functions = caretFuncs, 
-        method = "cv",
-        number = 5,
-        saveDetails = TRUE,
-        returnResamp = "all"
-        )
-
-trControl <- trainControl(
-        classProbs= TRUE,
-        summaryFunction = twoClassSummary)
-
-rfe_model <- rfe(
-    y = train_caret %>% dplyr::pull(target), 
-    x = train_caret %>% dplyr::select(-target, -id),  
-    sizes = c(1:300), 
-    rfeControl = rfeControl, 
-    trControl = trControl, 
-    method = "glmnet", 
-    metric = "ROC")
-
-# Back to sequential.
-stopCluster(cluster)
-registerDoSEQ()
-
-
-print(rfe_model)
-
-print(rfe_model$results)
-
-print(rfe_model$optVariables)
-
-rfe_select <- rfe_model$optVariables
-```
-
 ```{r glmnet_model}
 # Paralellize.
-cluster <- makeCluster(detectCores(logical = TRUE))
+cluster <- makeCluster(detectCores(logical = FALSE), type = "PSOCK")
 registerDoParallel(cluster)
 
-
-train_caret <- train
-train_caret$target <- as.factor(make.names(train$target))
-train_caret <- subset(train_caret, select = -id)
-  
-# Use the most important variables from all predictions.
-selection <- unique(rfe_select, ranger_select)
-  
 # Train control.
 # Alpha 0 = ridge regression L2 penalty; alpha 1 = lasso regression L1 penalty (penalizes sum of absolute values)
 # Lasso regression works well with many weak predictors, penalizing most of them to 0 contribution.
 # Ridge regression works well with several strong predictors.
 tuneGrid <- expand.grid(
-                        .alpha = 0,
-                        .lambda = seq(0, 1, length = 100)
+                        .alpha = 0:1,
+                        .lambda = seq(0, 0.5, 0.001)
                         )
 
-trControl <- trainControl(method = "repeatedcv",
-                          number = 5,
-                          repeats = 5,
+trControl <- trainControl(method = "cv",
+                          number = 10,
                           summaryFunction = twoClassSummary,
                           returnResamp = "all",
                           classProbs = TRUE
                           )
 
 # Train an "xgbTree" model with caret.
-glmnet_fit <- caret::train(data = train_caret %>% dplyr::select(target, selection),
+glmnet_fit <- caret::train(data = train_caret,
                     target ~ .,
                     method = "glmnet",
                     family = "binomial",
@@ -197,22 +129,20 @@ glmnet_fit <- caret::train(data = train_caret %>% dplyr::select(target, selectio
 
 # Back to sequential.
 stopCluster(cluster)
-registerDoSEQ()
-
 
 # Analyse glmnet_fitting results.
 glmnet_fit$bestTune
 
 # Visualization of the most important features.
-vip(glmnet_fit, num_features = 15) + ggtitle("Variable importance")
-# p <- vip(glmnet_fit, num_features = 30)
-# selection <- p$data$Variable
+vip(glmnet_fit, num_features = 40) + ggtitle("Variable importance")
+glmnet_select <- vip(fit, num_features = 40)
+glmnet_select <- glmnet_select$data$Variable
 
 # Plot tuning.
 ggplot(glmnet_fit)
 
 # Predicting on test_set.
-glmnet_fit_pred <- predict(glmnet_fit, subset(test, select = selection), type = "prob")
+glmnet_fit_pred <- predict(glmnet_fit, test, type = "prob")
 
 # We create the submission file.
 glmnet_pred <- data.frame(id = test$id, target = glmnet_fit_pred$X1)
@@ -226,58 +156,61 @@ write.table(glmnet_pred, file = "glmnet_submission.csv",
             sep = ",")
 ```
 
+```{r variable_selection_step}
+# Select important variables from both models and prepare test and train.
+selection <- unique(ranger_select, glmnet_select)
+
+train_caret <- train_caret[, c("target", selection)]
+test_caret <- test_caret[, selection]
+```
+
+
 ```{r ranger_model_prediction}
 # Paralellize.
-cluster <- makeCluster(detectCores(logical = TRUE))
+cluster <- makeCluster(detectCores(logical = FALSE), type = "PSOCK")
 registerDoParallel(cluster)
-
-train_caret <- train
-train_caret$target <- as.factor(make.names(train$target))
 
 # Create a tuning grid for testing hyperparameters. Optimal mtry for ranger was around 42.
 tuneGrid <- expand.grid(
-                        .mtry = seq(1, 15, 1),
-                        .splitrule = "gini",
+                        .mtry = seq(1, 9, 1),
+                        .splitrule = "extratrees",
                         .min.node.size = 10
                        )
 # Train control.
-trControl <- trainControl(method = "repeatedcv",
-                          number = 5,
-                          repeats = 5,
+trControl <- trainControl(method = "cv",
+                          number = 10,
                           returnResamp = "all",
                           classProbs = TRUE,
                           summaryFunction = twoClassSummary
                           )
 
 
-
 # Train ranger model with caret.
 ranger_fit <- caret::train(
-                    data = train_caret %>% dplyr::select(target, selection),
+                    data = train_caret,
                     target ~ .,
                     method = "ranger",
                     metric = "ROC",
                     trControl = trControl,
                     tuneGrid = tuneGrid,
                     preProcess = c("center", "scale"),
-                    num.trees = 1200,
+                    num.trees = 1000,
                     importance = "permutation")
 
 # Back to sequential.
 stopCluster(cluster)
-registerDoSEQ()
 
 # Analyse ranger_fitting results.
 ranger_fit$bestTune
 
 # Visualization of the most important features.
-vip(ranger_fit, num_features = 15) + ggtitle("Variable importance")
+vip(ranger_fit, num_features = 40) + ggtitle("Variable importance")
 
 # Plot tuning.
 ggplot(ranger_fit)
 
 # Predicting on test_set.
-ranger_fit_pred <- predict(ranger_fit, test, type = "prob")
+ranger_fit_pred <- predict(ranger_fit, test_caret, type = "prob")
 
 # We create the submission file.
 ranger_pred <- data.frame(id = test$id, target = ranger_fit_pred$X1)
@@ -295,29 +228,27 @@ write.table(ranger_pred, file = "ranger_submission.csv",
 ```{r}
 # Create a tuning grid for testing hyperparameters.
 tuneGrid <- expand.grid(
-                  nrounds = seq(50, 1500, 10),
-                   eta = 0.01,
-                   max_depth = 4,
-                   gamma = 0.15,
-                   colsample_bytree = 0.8,
+                  nrounds = seq(25, 4000, 25),
+                   eta = 0.001,
+                   max_depth = 2,
+                   gamma = 0.6,
+                   colsample_bytree = 0.45,
                    min_child_weight = 1,
-                   subsample = 0.1
+                   subsample = 0.3
                     )
 # Train control.
 trControl <- trainControl(
-                          method = "repeatedcv",
-                          number = 5,
-                          repeats = 5,
+                          method = "cv",
+                          number = 10,
                           returnResamp = "all",
                           summaryFunction = twoClassSummary,
                           classProbs = TRUE)
 
-# Paralellize.
-cluster <- makeCluster(detectCores(logical = TRUE))
+cluster <- makeCluster(detectCores(logical = FALSE), type = "PSOCK")
 registerDoParallel(cluster)
 
 # Train an "xgbTree" model with caret.
-xgbtree_fit <- caret::train(data = subset(train_caret, select = c("target", selection)),
+xgbtree_fit <- caret::train(data = train_caret,
                     target ~ .,
                     method = "xgbTree",
                     metric = "ROC",
@@ -327,19 +258,18 @@ xgbtree_fit <- caret::train(data = subset(train_caret, select = c("target", sele
 
 # Back to sequential.
 stopCluster(cluster)
-registerDoSEQ()
 
 # Analyse xgbtree_fitting results.
 xgbtree_fit$bestTune
 
 # Visualization of the most important features.
-vip(xgbtree_fit, num_features = 15) + ggtitle("Variable importance")
+vip(xgbtree_fit, num_features = 40) + ggtitle("Variable importance")
 
 # Plot tuning.
 ggplot(xgbtree_fit)
 
 # Predicting on test_set.
-xgbtree_fit_pred <- predict(xgbtree_fit, test, type = "prob")
+xgbtree_fit_pred <- predict(xgbtree_fit, test_caret, type = "prob")
 
 # We create the submission file.
 xgbtree_pred <- data.frame(id = test$id, target = xgbtree_fit_pred$X1)
