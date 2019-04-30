@@ -17,6 +17,7 @@ if(!require(vtreat)) install.packages("vtreat")
 if(!require(magrittr)) install.packages("magrittr")
 if(!require(vip)) install.packages("vip")
 if(!require(glmnet)) install.packages("glmnet")
+if(!require(Matrix)) install.packages("Matrix")
 ```
 
 ```{r Dataset_read_in, echo = FALSE, warning = FALSE, message = FALSE}
@@ -77,6 +78,15 @@ vip(fit, num_features = 150) + ggtitle("Variable importance")
 ranger_select <- vip(fit, num_features = 150)
 ranger_select <- ranger_select$data$Variable
 
+
+ranger_select <- varImp(fit, scale = FALSE)
+ranger_select <- data.frame(variable = paste0("X", 0:299), overall = ranger_select$importance$Overall)
+ranger_select %>% arrange(desc(overall))
+ranger_select <- ranger_select %>% arrange(desc(overall)) %>% filter(overall >= 0.0001) %>% select(variable)
+ranger_select <- ranger_select$variable %>% as.character()
+
+train_feature_selection <- subset(train_caret, select = ranger_select)
+
 # Plot tuning.
 ggplot(fit)
 
@@ -106,8 +116,8 @@ registerDoParallel(cluster)
 # Lasso regression works well with many weak predictors, penalizing most of them to 0 contribution.
 # Ridge regression works well with several strong predictors.
 tuneGrid <- expand.grid(
-                        .alpha = seq(0, 1, 0.05),
-                        .lambda = seq(0, 0.5, 0.001)
+                        .alpha = 1,
+                        .lambda = seq(0, 1, 0.0001)
                         )
 
 trControl <- trainControl(method = "cv",
@@ -118,8 +128,8 @@ trControl <- trainControl(method = "cv",
                           )
 
 # Train an "xgbTree" model with caret.
-glmnet_fit <- caret::train(data = train_caret,
-                    target ~ .,
+glmnet_fit <- caret::train(x = train_feature_selection,
+                    y = train_caret$target,
                     method = "glmnet",
                     family = "binomial",
                     metric = "ROC",
@@ -248,8 +258,8 @@ cluster <- makeCluster(detectCores(logical = FALSE), type = "PSOCK")
 registerDoParallel(cluster)
 
 # Train an "xgbTree" model with caret.
-xgbtree_fit <- caret::train(data = train_caret,
-                    target ~ .,
+xgbtree_fit <- caret::train(x = train_feature_selection,
+                    y = train_caret$target,
                     method = "xgbTree",
                     metric = "ROC",
                     trControl = trControl,
@@ -269,7 +279,7 @@ vip(xgbtree_fit, num_features = 150) + ggtitle("Variable importance")
 ggplot(xgbtree_fit)
 
 # Predicting on test_set.
-xgbtree_fit_pred <- predict(xgbtree_fit, test_caret, type = "prob")
+xgbtree_fit_pred <- predict(xgbtree_fit, test_caret[, ranger_select], type = "prob")
 
 # We create the submission file.
 xgbtree_pred <- data.frame(id = test$id, target = xgbtree_fit_pred$X1)
@@ -285,15 +295,45 @@ write.table(xgbtree_pred, file = "xgbtree_submission.csv",
 ```
 
 
+
+
+
 ```{r}
-# We create the submission file.
-combined_pred <- data.frame(id = test$id, target = (ranger_fit_pred$X1 + glmnet_fit_pred$X1 + xgbtree_fit_pred$X1) / 3)
+cluster <- makeCluster(detectCores(logical = FALSE), type = "PSOCK")
+registerDoParallel(cluster)
 
-colnames(combined_pred) <- c("id", "target")
+# Add mean
 
-write.table(combined_pred, file = "combined_submission.csv",
+# train_feature_selection$mean_ <- apply(train_feature_selection, 1, mean)
+# test_caret$mean_ <- apply(test_caret[, ranger_select], 1, mean)
+
+
+glmnet_cv_model <- cv.glmnet(
+          x = train_feature_selection %>% as.matrix(),
+          y = as.factor(train_caret$target),
+          alpha = 1,
+          family = "binomial",
+          type.measure = "auc",
+          parallel = TRUE,
+          nfolds = 10
+          )
+
+stopCluster(cluster)
+
+plot(glmnet_cv_model)
+
+glmnet_cv_model_pred <- predict(glmnet_cv_model, as.matrix(test_caret[, c(ranger_select, "mean_")]), type = "response")
+
+glmnet_cv_model_submission <- data.frame(id = test$id, target = glmnet_cv_model_pred)
+
+colnames(glmnet_cv_model_submission) <- c("id", "target")
+
+write.table(glmnet_cv_model_submission,
+            file = "glmnet_cv_submission.csv",
             col.names = TRUE,
             row.names = FALSE,
             quote = FALSE,
             sep = ",")
+
+
 ```
